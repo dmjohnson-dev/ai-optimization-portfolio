@@ -1,5 +1,4 @@
 import os
-import json
 import numpy as np
 import pandas as pd
 
@@ -9,7 +8,7 @@ from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
 from sklearn.ensemble import VotingRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
-from sklearn.metrics import mean_squared_error, make_scorer
+from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error, make_scorer
 from sklearn.inspection import permutation_importance
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,11 +31,15 @@ def add_time_features(X: pd.DataFrame, dt: pd.Series) -> pd.DataFrame:
     return X
 
 
-def rmse_value(y_true, y_pred) -> float:
+def rmse(y_true, y_pred) -> float:
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
 
-rmse_scorer = make_scorer(lambda yt, yp: rmse_value(yt, yp), greater_is_better=False)
+def mape_percent(y_true, y_pred) -> float:
+    return float(mean_absolute_percentage_error(y_true, y_pred) * 100.0)
+
+
+rmse_scorer = make_scorer(lambda yt, yp: rmse(yt, yp), greater_is_better=False)
 
 
 def load_split():
@@ -69,22 +72,24 @@ def load_split():
     )
 
 
-def baseline_models():
-    air = Pipeline([
+def baseline_air():
+    return Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("rf", MultiOutputRegressor(
+        ("model", MultiOutputRegressor(
             RandomForestRegressor(n_estimators=300, random_state=SEED, n_jobs=-1)
         ))
     ])
-    health = Pipeline([
+
+
+def baseline_health():
+    return Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("rf", RandomForestRegressor(n_estimators=400, random_state=SEED, n_jobs=-1))
+        ("model", RandomForestRegressor(n_estimators=400, random_state=SEED, n_jobs=-1))
     ])
-    return air, health
 
 
-# B1
-def b1_random_search_air(X_train, Y_train):
+# B1(1) tuned models
+def tuned_air(X_train, Y_train):
     base = MultiOutputRegressor(RandomForestRegressor(random_state=SEED, n_jobs=-1))
     tscv = TimeSeriesSplit(n_splits=5)
     param_dist = {
@@ -95,20 +100,15 @@ def b1_random_search_air(X_train, Y_train):
         "estimator__max_features": ["sqrt", 0.5, 0.8],
     }
     search = RandomizedSearchCV(
-        estimator=base,
-        param_distributions=param_dist,
-        n_iter=20,
-        scoring=rmse_scorer,
-        cv=tscv,
-        random_state=SEED,
-        n_jobs=-1,
+        base, param_distributions=param_dist, n_iter=20, scoring=rmse_scorer,
+        cv=tscv, random_state=SEED, n_jobs=-1
     )
-    pipe = Pipeline([("imputer", SimpleImputer(strategy="median")), ("search", search)])
+    pipe = Pipeline([("imputer", SimpleImputer(strategy="median")), ("model", search)])
     pipe.fit(X_train, Y_train)
-    return pipe.named_steps["search"].best_params_, pipe.named_steps["search"].best_score_
+    return pipe
 
 
-def b1_random_search_health(X_train, y_train):
+def tuned_health(X_train, y_train):
     base = RandomForestRegressor(random_state=SEED, n_jobs=-1)
     tscv = TimeSeriesSplit(n_splits=5)
     param_dist = {
@@ -119,75 +119,83 @@ def b1_random_search_health(X_train, y_train):
         "max_features": ["sqrt", 0.5, 0.8],
     }
     search = RandomizedSearchCV(
-        estimator=base,
-        param_distributions=param_dist,
-        n_iter=20,
-        scoring=rmse_scorer,
-        cv=tscv,
-        random_state=SEED,
-        n_jobs=-1,
+        base, param_distributions=param_dist, n_iter=20, scoring=rmse_scorer,
+        cv=tscv, random_state=SEED, n_jobs=-1
     )
-    pipe = Pipeline([("imputer", SimpleImputer(strategy="median")), ("search", search)])
+    pipe = Pipeline([("imputer", SimpleImputer(strategy="median")), ("model", search)])
     pipe.fit(X_train, y_train)
-    return pipe.named_steps["search"].best_params_, pipe.named_steps["search"].best_score_
+    return pipe
 
 
-def b1_feature_selection_health(fitted_health_pipeline, X_train, y_train, top_k=15):
-    imputer = fitted_health_pipeline.named_steps["imputer"]
-    model = fitted_health_pipeline.named_steps["rf"]
+# B1(2) feature selection (health only)
+def feature_select_health(fitted_baseline_health, X_train, y_train, top_k=15):
+    imputer = fitted_baseline_health.named_steps["imputer"]
+    model = fitted_baseline_health.named_steps["model"]
     X_imp = imputer.transform(X_train)
-    result = permutation_importance(
-        model, X_imp, y_train,
-        n_repeats=5, random_state=SEED, n_jobs=-1
-    )
-    feature_names = X_train.columns.tolist()
-    ranked = sorted(zip(feature_names, result.importances_mean), key=lambda x: x[1], reverse=True)
+
+    res = permutation_importance(model, X_imp, y_train, n_repeats=5, random_state=SEED, n_jobs=-1)
+    ranked = sorted(zip(X_train.columns.tolist(), res.importances_mean), key=lambda x: x[1], reverse=True)
     keep = [name for name, _ in ranked[:top_k]]
-    return keep, ranked
+    return keep
 
 
-# B2
-def b2_regularized_health_models():
-    reg_constraints = Pipeline([
+# B2 regularization (health)
+def reg_constraints_health():
+    return Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("rf", RandomForestRegressor(
+        ("model", RandomForestRegressor(
             n_estimators=500, random_state=SEED, n_jobs=-1,
             max_depth=12, min_samples_leaf=5, min_samples_split=10
         ))
     ])
-    reg_pruning = Pipeline([
+
+
+def reg_pruning_health():
+    return Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("rf", RandomForestRegressor(
+        ("model", RandomForestRegressor(
             n_estimators=500, random_state=SEED, n_jobs=-1,
             ccp_alpha=0.0005, min_samples_leaf=2
         ))
     ])
-    return reg_constraints, reg_pruning
 
 
-# -----------------------------
-# B3 Ensemble Learning (NEW)
-# -----------------------------
-def b3_ensemble_models():
-    """
-    Two ensemble techniques:
-    1) ExtraTreesRegressor (different randomized tree ensemble)
-    2) VotingRegressor (averaging predictions from multiple models)
-    """
-    extra = Pipeline([
+# B3 ensemble (health)
+def ensemble_extratrees_health():
+    return Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
         ("model", ExtraTreesRegressor(n_estimators=600, random_state=SEED, n_jobs=-1))
     ])
 
+
+def ensemble_voting_health():
     rf = RandomForestRegressor(n_estimators=500, random_state=SEED, n_jobs=-1)
     et = ExtraTreesRegressor(n_estimators=600, random_state=SEED, n_jobs=-1)
-
-    vote = Pipeline([
+    return Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
         ("model", VotingRegressor([("rf", rf), ("et", et)]))
     ])
 
-    return extra, vote
+
+def eval_air(Y_true: pd.DataFrame, Y_pred: np.ndarray, label: str) -> list[dict]:
+    rows = []
+    for i, t in enumerate(TARGETS_AIR):
+        rows.append({
+            "variant": label,
+            "target": t,
+            "RMSE": rmse(Y_true[t].values, Y_pred[:, i]),
+            "MAPE_percent": mape_percent(Y_true[t].values, Y_pred[:, i]),
+        })
+    return rows
+
+
+def eval_health(y_true: np.ndarray, y_pred: np.ndarray, label: str) -> dict:
+    return {
+        "variant": label,
+        "target": TARGET_HEALTH,
+        "RMSE": rmse(y_true, y_pred),
+        "MAPE_percent": mape_percent(y_true, y_pred),
+    }
 
 
 def main():
@@ -196,54 +204,62 @@ def main():
     (X_air_tr, X_air_te, Y_air_tr, Y_air_te,
      X_h_tr, X_h_te, Y_h_tr, Y_h_te) = load_split()
 
-    # Baseline fit (for B1 feature selection)
-    _, health_base = baseline_models()
-    health_base.fit(X_h_tr, Y_h_tr)
+    metrics_air = []
+    metrics_health = []
 
-    # B1 artifacts
-    air_best_params, air_best_score = b1_random_search_air(X_air_tr, Y_air_tr)
-    h_best_params, h_best_score = b1_random_search_health(X_h_tr, Y_h_tr)
-    keep_feats, ranked = b1_feature_selection_health(health_base, X_h_tr, Y_h_tr, top_k=15)
+    # BASELINE
+    air0 = baseline_air()
+    h0 = baseline_health()
+    air0.fit(X_air_tr, Y_air_tr)
+    h0.fit(X_h_tr, Y_h_tr)
 
-    with open(os.path.join(OUT_DIR, "b1_best_params.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "air_best_params": air_best_params,
-            "air_cv_score_neg_rmse": air_best_score,
-            "health_best_params": h_best_params,
-            "health_cv_score_neg_rmse": h_best_score
-        }, f, indent=2)
+    air_pred0 = air0.predict(X_air_te)
+    h_pred0 = h0.predict(X_h_te)
 
-    pd.DataFrame(ranked, columns=["feature", "perm_importance_mean"]).to_csv(
-        os.path.join(OUT_DIR, "b1_health_feature_importance.csv"), index=False
-    )
-    pd.DataFrame({"selected_features": keep_feats}).to_csv(
-        os.path.join(OUT_DIR, "b1_health_selected_features.csv"), index=False
-    )
+    metrics_air += eval_air(Y_air_te, air_pred0, "baseline")
+    metrics_health.append(eval_health(Y_h_te.values, h_pred0, "baseline"))
 
-    # B2 apply regularization
-    reg_constraints, reg_pruning = b2_regularized_health_models()
-    reg_constraints.fit(X_h_tr, Y_h_tr)
-    reg_pruning.fit(X_h_tr, Y_h_tr)
+    # B1(1) tuned
+    air_t = tuned_air(X_air_tr, Y_air_tr)
+    h_t = tuned_health(X_h_tr, Y_h_tr)
+    air_pred_t = air_t.predict(X_air_te)
+    h_pred_t = h_t.predict(X_h_te)
 
-    with open(os.path.join(OUT_DIR, "b2_regularization_settings.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "reg_constraints": {"max_depth": 12, "min_samples_leaf": 5, "min_samples_split": 10},
-            "reg_pruning": {"ccp_alpha": 0.0005, "min_samples_leaf": 2}
-        }, f, indent=2)
+    metrics_air += eval_air(Y_air_te, air_pred_t, "opt_random_search")
+    metrics_health.append(eval_health(Y_h_te.values, h_pred_t, "opt_random_search"))
 
-    # B3 apply ensemble learning
-    extra, vote = b3_ensemble_models()
-    extra.fit(X_h_tr, Y_h_tr)
-    vote.fit(X_h_tr, Y_h_tr)
+    # B1(2) feature selection health
+    keep = feature_select_health(h0, X_h_tr, Y_h_tr, top_k=15)
+    X_h_tr_fs = X_h_tr[keep]
+    X_h_te_fs = X_h_te[keep]
+    h_fs = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("model", RandomForestRegressor(n_estimators=500, random_state=SEED, n_jobs=-1))
+    ])
+    h_fs.fit(X_h_tr_fs, Y_h_tr)
+    h_pred_fs = h_fs.predict(X_h_te_fs)
+    metrics_health.append(eval_health(Y_h_te.values, h_pred_fs, "opt_feature_selection"))
 
-    with open(os.path.join(OUT_DIR, "b3_ensemble_settings.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "ensemble_1": "ExtraTreesRegressor(n_estimators=600)",
-            "ensemble_2": "VotingRegressor(RandomForestRegressor + ExtraTreesRegressor)"
-        }, f, indent=2)
+    # B2 regularization
+    h_reg1 = reg_constraints_health()
+    h_reg2 = reg_pruning_health()
+    h_reg1.fit(X_h_tr, Y_h_tr)
+    h_reg2.fit(X_h_tr, Y_h_tr)
+    metrics_health.append(eval_health(Y_h_te.values, h_reg1.predict(X_h_te), "reg_constraints"))
+    metrics_health.append(eval_health(Y_h_te.values, h_reg2.predict(X_h_te), "reg_pruning_ccp_alpha"))
 
-    print("B3 complete:")
-    print("- Saved ensemble settings: outputs/task2/b3_ensemble_settings.json")
+    # B3 ensemble
+    h_extra = ensemble_extratrees_health()
+    h_vote = ensemble_voting_health()
+    h_extra.fit(X_h_tr, Y_h_tr)
+    h_vote.fit(X_h_tr, Y_h_tr)
+    metrics_health.append(eval_health(Y_h_te.values, h_extra.predict(X_h_te), "ensemble_extratrees"))
+    metrics_health.append(eval_health(Y_h_te.values, h_vote.predict(X_h_te), "ensemble_voting"))
+
+    pd.DataFrame(metrics_air).to_csv(os.path.join(OUT_DIR, "task2_air_metrics.csv"), index=False)
+    pd.DataFrame(metrics_health).to_csv(os.path.join(OUT_DIR, "task2_health_metrics.csv"), index=False)
+
+    print("C1 complete: saved RMSE + MAPE metrics to outputs/task2/.")
 
 
 if __name__ == "__main__":
