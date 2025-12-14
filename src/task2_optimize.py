@@ -11,9 +11,6 @@ from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import mean_squared_error, make_scorer
 from sklearn.inspection import permutation_importance
 
-# -----------------------------
-# Robust paths (works in PyCharm)
-# -----------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(BASE_DIR, "data", "DQN1_Dataset.xlsx")
 SHEET_NAME = "Data"
@@ -52,14 +49,12 @@ def load_split():
     df["datetime"] = pd.to_datetime(df["datetimeEpoch"], unit="s", errors="coerce")
     df = df.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
 
-    # AIR
     X_air = df.drop(columns=TARGETS_AIR + [TARGET_HEALTH], errors="ignore")
     X_air = X_air.drop(columns=["datetimeEpoch", "datetime"], errors="ignore")
     X_air = add_time_features(X_air, df["datetime"])
     X_air = X_air.select_dtypes(include=[np.number])
     Y_air = df[TARGETS_AIR].copy()
 
-    # HEALTH (includes pollutants)
     X_h = df.drop(columns=[TARGET_HEALTH], errors="ignore")
     X_h = X_h.drop(columns=["datetimeEpoch", "datetime"], errors="ignore")
     X_h = add_time_features(X_h, df["datetime"])
@@ -87,11 +82,12 @@ def baseline_models():
     return air, health
 
 
+# -----------------------------
+# B1 Optimization (unchanged)
+# -----------------------------
 def b1_random_search_air(X_train, Y_train):
-    """B1 Optimization Technique #1: Hyperparameter tuning using RandomizedSearchCV (AIR model)."""
     base = MultiOutputRegressor(RandomForestRegressor(random_state=SEED, n_jobs=-1))
     tscv = TimeSeriesSplit(n_splits=5)
-
     param_dist = {
         "estimator__n_estimators": [200, 300, 400, 600],
         "estimator__max_depth": [None, 10, 15, 25],
@@ -99,7 +95,6 @@ def b1_random_search_air(X_train, Y_train):
         "estimator__min_samples_split": [2, 5, 10],
         "estimator__max_features": ["sqrt", 0.5, 0.8],
     }
-
     search = RandomizedSearchCV(
         estimator=base,
         param_distributions=param_dist,
@@ -109,20 +104,14 @@ def b1_random_search_air(X_train, Y_train):
         random_state=SEED,
         n_jobs=-1,
     )
-
     pipe = Pipeline([("imputer", SimpleImputer(strategy="median")), ("search", search)])
     pipe.fit(X_train, Y_train)
-
-    best_params = pipe.named_steps["search"].best_params_
-    best_score = pipe.named_steps["search"].best_score_
-    return pipe, best_params, best_score
+    return pipe, pipe.named_steps["search"].best_params_, pipe.named_steps["search"].best_score_
 
 
 def b1_random_search_health(X_train, y_train):
-    """B1 Optimization Technique #1: Hyperparameter tuning using RandomizedSearchCV (HEALTH model)."""
     base = RandomForestRegressor(random_state=SEED, n_jobs=-1)
     tscv = TimeSeriesSplit(n_splits=5)
-
     param_dist = {
         "n_estimators": [200, 300, 400, 600],
         "max_depth": [None, 10, 15, 25],
@@ -130,7 +119,6 @@ def b1_random_search_health(X_train, y_train):
         "min_samples_split": [2, 5, 10],
         "max_features": ["sqrt", 0.5, 0.8],
     }
-
     search = RandomizedSearchCV(
         estimator=base,
         param_distributions=param_dist,
@@ -140,32 +128,51 @@ def b1_random_search_health(X_train, y_train):
         random_state=SEED,
         n_jobs=-1,
     )
-
     pipe = Pipeline([("imputer", SimpleImputer(strategy="median")), ("search", search)])
     pipe.fit(X_train, y_train)
-
-    best_params = pipe.named_steps["search"].best_params_
-    best_score = pipe.named_steps["search"].best_score_
-    return pipe, best_params, best_score
+    return pipe, pipe.named_steps["search"].best_params_, pipe.named_steps["search"].best_score_
 
 
 def b1_feature_selection_health(fitted_health_pipeline, X_train, y_train, top_k=15):
-    """B1 Optimization Technique #2: Feature selection via permutation importance (HEALTH model)."""
     imputer = fitted_health_pipeline.named_steps["imputer"]
     model = fitted_health_pipeline.named_steps["rf"]
-
     X_imp = imputer.transform(X_train)
     result = permutation_importance(
         model, X_imp, y_train,
-        n_repeats=5,
-        random_state=SEED,
-        n_jobs=-1
+        n_repeats=5, random_state=SEED, n_jobs=-1
     )
-
     feature_names = X_train.columns.tolist()
     ranked = sorted(zip(feature_names, result.importances_mean), key=lambda x: x[1], reverse=True)
     keep = [name for name, _ in ranked[:top_k]]
     return keep, ranked
+
+
+# -----------------------------
+# B2 Regularization (NEW)
+# -----------------------------
+def b2_regularized_health_models():
+    """
+    B2 Regularization methods for RandomForest:
+    1) Complexity constraints: max_depth + min_samples_leaf
+    2) Pruning: ccp_alpha (cost-complexity pruning)
+    """
+    reg_constraints = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("rf", RandomForestRegressor(
+            n_estimators=500, random_state=SEED, n_jobs=-1,
+            max_depth=12, min_samples_leaf=5, min_samples_split=10
+        ))
+    ])
+
+    reg_pruning = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("rf", RandomForestRegressor(
+            n_estimators=500, random_state=SEED, n_jobs=-1,
+            ccp_alpha=0.0005, min_samples_leaf=2
+        ))
+    ])
+
+    return reg_constraints, reg_pruning
 
 
 def main():
@@ -174,16 +181,14 @@ def main():
     (X_air_tr, X_air_te, Y_air_tr, Y_air_te,
      X_h_tr, X_h_te, Y_h_tr, Y_h_te) = load_split()
 
-    # Baseline fit (used for feature selection)
     air_base, health_base = baseline_models()
     air_base.fit(X_air_tr, Y_air_tr)
     health_base.fit(X_h_tr, Y_h_tr)
 
-    # -----------------------------
-    # B1(1) Hyperparameter tuning
-    # -----------------------------
-    air_search_pipe, air_best_params, air_best_score = b1_random_search_air(X_air_tr, Y_air_tr)
-    health_search_pipe, h_best_params, h_best_score = b1_random_search_health(X_h_tr, Y_h_tr)
+    # B1 artifacts
+    _, air_best_params, air_best_score = b1_random_search_air(X_air_tr, Y_air_tr)
+    _, h_best_params, h_best_score = b1_random_search_health(X_h_tr, Y_h_tr)
+    keep_feats, ranked = b1_feature_selection_health(health_base, X_h_tr, Y_h_tr, top_k=15)
 
     with open(os.path.join(OUT_DIR, "b1_best_params.json"), "w", encoding="utf-8") as f:
         json.dump({
@@ -193,11 +198,6 @@ def main():
             "health_cv_score_neg_rmse": h_best_score
         }, f, indent=2)
 
-    # -----------------------------
-    # B1(2) Feature selection
-    # -----------------------------
-    keep_feats, ranked = b1_feature_selection_health(health_base, X_h_tr, Y_h_tr, top_k=15)
-
     pd.DataFrame(ranked, columns=["feature", "perm_importance_mean"]).to_csv(
         os.path.join(OUT_DIR, "b1_health_feature_importance.csv"), index=False
     )
@@ -205,9 +205,26 @@ def main():
         os.path.join(OUT_DIR, "b1_health_selected_features.csv"), index=False
     )
 
-    print("B1 complete:")
-    print("- Saved tuned hyperparameters: outputs/task2/b1_best_params.json")
-    print("- Saved feature ranking + selected features in outputs/task2/")
+    # -----------------------------
+    # B2 apply regularization (fit models)
+    # -----------------------------
+    reg_constraints, reg_pruning = b2_regularized_health_models()
+    reg_constraints.fit(X_h_tr, Y_h_tr)
+    reg_pruning.fit(X_h_tr, Y_h_tr)
+
+    with open(os.path.join(OUT_DIR, "b2_regularization_settings.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "reg_constraints": {
+                "max_depth": 12, "min_samples_leaf": 5, "min_samples_split": 10
+            },
+            "reg_pruning": {
+                "ccp_alpha": 0.0005, "min_samples_leaf": 2
+            }
+        }, f, indent=2)
+
+    print("B2 complete:")
+    print("- Saved regularization settings: outputs/task2/b2_regularization_settings.json")
+
 
 if __name__ == "__main__":
     main()
