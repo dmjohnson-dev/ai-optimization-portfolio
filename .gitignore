@@ -4,3 +4,53 @@ __pycache__/
 *.pyc
 ~$*.docx
 outputs/
+# =====================
+# Python
+# =====================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# =====================
+# Virtual Environments
+# =====================
+venv/
+.env/
+.env.*
+
+# =====================
+# Jupyter / Data Science
+# =====================
+.ipynb_checkpoints/
+*.ipynb
+*.csv
+*.tsv
+*.parquet
+*.h5
+*.pkl
+
+# =====================
+# ML / Optimization Artifacts
+# =====================
+models/
+checkpoints/
+weights/
+outputs/
+logs/
+
+# =====================
+# IDEs
+# =====================
+.vscode/
+.idea/
+*.iml
+
+# =====================
+# OS
+# =====================
+.DS_Store
+Thumbs.db
